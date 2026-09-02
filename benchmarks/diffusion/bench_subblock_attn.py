@@ -9,9 +9,9 @@ FlashInfer wrapper's layout/packing work from ``fused_attn_device`` itself.
 
 Examples:
     python benchmarks/diffusion/bench_subblock_attn.py --preset smoke
-    python benchmarks/diffusion/bench_subblock_attn.py --preset h3-5s --output-json result.json
+    python benchmarks/diffusion/bench_subblock_attn.py --preset h3-long --output-json result.json
 
-The synthetic 5-second shape is a kernel/integration gate, not a real-model H3
+The synthetic long-sequence shape is a kernel/integration gate, not a real-model H3
 quality or end-to-end benchmark. Any real-model claim must name its task and
 report DiT, pipeline, video/audio diagnostics, and actual sparse-call counters.
 """
@@ -38,9 +38,9 @@ from vllm_omni.diffusion.forward_context import ForwardContext, override_forward
 
 _PRESETS = {
     "smoke": {"seq_len": 4096, "heads": 8},
-    # Representative long H3 self-attention shape used for the first 5-second
+    # Representative long H3 self-attention shape used for the initial
     # performance gate. Replace with the observed packed length in final runs.
-    "h3-5s": {"seq_len": 37760, "heads": 56},
+    "h3-long": {"seq_len": 37760, "heads": 56},
 }
 
 

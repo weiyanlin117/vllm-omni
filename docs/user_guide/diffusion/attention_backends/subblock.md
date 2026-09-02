@@ -151,9 +151,9 @@ python benchmarks/diffusion/bench_subblock_attn.py \
   --output-json subblock-smoke.json
 
 python benchmarks/diffusion/bench_subblock_attn.py \
-  --preset h3-5s --heads 14 --input-layout contiguous \
+  --preset h3-long --heads 14 --input-layout contiguous \
   --warmup 5 --iters 10 \
-  --output-json subblock-h3-5s.json
+  --output-json subblock-h3-long.json
 ```
 
 The second command models one USP4 rank (`56 / 4 = 14` heads); use
