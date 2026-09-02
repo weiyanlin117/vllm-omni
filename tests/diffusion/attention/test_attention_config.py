@@ -167,6 +167,62 @@ class TestAttentionSpec:
         assert cfg.precision == "mix"
         assert type(cfg.precision) is str
 
+    def test_subblock_defaults_applied_when_backend_selected(self):
+        spec = AttentionSpec(backend="SUBBLOCK_ATTN")
+        assert spec.subblock.sparsity == 0.75
+        assert spec.backend_kwargs() == {
+            "sparsity": 0.75,
+            "skip_first_steps": 10,
+            "skip_first_layers": 0,
+            "n_q": 4,
+            "n_k": 4,
+            "min_seq_len": 24576,
+        }
+
+    def test_subblock_config_serialized(self):
+        spec = AttentionSpec(
+            backend="SUBBLOCK_ATTN",
+            subblock={
+                "sparsity": 0.8,
+                "skip_first_steps": 5,
+                "skip_first_layers": 2,
+                "n_q": 8,
+                "n_k": 4,
+                "min_seq_len": 8192,
+            },
+        )
+        assert spec.backend_kwargs() == {
+            "sparsity": 0.8,
+            "skip_first_steps": 5,
+            "skip_first_layers": 2,
+            "n_q": 8,
+            "n_k": 4,
+            "min_seq_len": 8192,
+        }
+
+    @pytest.mark.parametrize(
+        "subblock",
+        [
+            {"sparsity": 1.0},
+            {"sparsity": float("nan")},
+            {"sparsity": True},
+            {"skip_first_steps": -1},
+            {"skip_first_layers": True},
+            {"n_q": 3},
+            {"n_q": 4.0},
+            {"n_k": False},
+            {"n_k": 16},
+            {"min_seq_len": 0},
+        ],
+    )
+    def test_subblock_invalid_values(self, subblock):
+        with pytest.raises(ValueError, match="subblock"):
+            AttentionSpec(backend="SUBBLOCK_ATTN", subblock=subblock)
+
+    def test_subblock_rejected_on_other_backend(self):
+        with pytest.raises(ValueError, match="subblock is only supported by the SUBBLOCK_ATTN"):
+            AttentionSpec(backend="TRTLLM_ATTN", subblock={"sparsity": 0.75})
+
 
 class TestAttentionConfig:
     def test_empty_config(self):

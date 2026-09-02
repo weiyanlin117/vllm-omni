@@ -297,6 +297,62 @@ _STEP_SHAPE = "minimax_h3_shape"
 _STEP_TRANSFORMER = "minimax_h3_transformer"
 
 
+def _minimax_h3_subblock_runtime_snapshot(transformer: nn.Module) -> dict[str, Any]:
+    # Keep the hardware-specific backend out of CPU/NPU/MUSA and dense CUDA
+    # request paths. AttentionImpl is not an nn.Module, so follow H3's short
+    # MiniMaxH3Attention -> Attention -> AttentionImpl ownership chain.
+    configured = False
+    for child in transformer.modules():
+        candidate: Any = child
+        for _ in range(3):
+            if getattr(candidate, "subblock_configured", False):
+                configured = True
+                break
+            candidate = getattr(candidate, "attention", None)
+            if candidate is None:
+                break
+        if configured:
+            break
+    if not configured:
+        return {
+            "configured_layers": 0,
+            "sparse_eligible_layers": 0,
+            "actual_sparse_calls": 0,
+            "dense_calls_by_reason": {},
+            "last_plan_density_min": None,
+            "last_plan_density_max": None,
+        }
+
+    from vllm_omni.diffusion.attention.backends.subblock_attn import collect_subblock_runtime_stats
+
+    return collect_subblock_runtime_stats(transformer)
+
+
+def _log_minimax_h3_subblock_runtime(
+    *,
+    task: str,
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> None:
+    if not after["configured_layers"]:
+        return
+    from vllm_omni.diffusion.attention.backends.subblock_attn import subblock_runtime_delta
+
+    delta = subblock_runtime_delta(before, after)
+    logger.info(
+        "MiniMax H3 SUBBLOCK_ATTN request stats (rank local): task=%s, configured_layers=%d, "
+        "sparse_eligible_layers=%d, actual_sparse_calls=%d, dense_calls_by_reason=%s, "
+        "last_plan_density=[%s, %s]",
+        task,
+        delta["configured_layers"],
+        delta["sparse_eligible_layers"],
+        delta["actual_sparse_calls"],
+        delta["dense_calls_by_reason"],
+        delta["last_plan_density_min"],
+        delta["last_plan_density_max"],
+    )
+
+
 def _minimax_h3_step_schedule(state: StepRequestState) -> dict[str, float]:
     """Return the sigma/timestep values this request needs for its current step.
 
@@ -2061,6 +2117,7 @@ class MiniMaxH3Pipeline(
         )
         branch = inputs["branch"]
         transformer = self._transformer_for_task(task)
+        subblock_before = _minimax_h3_subblock_runtime_snapshot(transformer)
         with self._resident_dit_layers_on_device(enabled=transformer is self.transformer):
             with self.progress_bar(total=len(inputs["sigmas_video"]) - 1) as progress:
                 video_rows, audio_rows = minimax_h3_denoise_loop(
@@ -2077,6 +2134,11 @@ class MiniMaxH3Pipeline(
                     audio_cond_noise_aug_for_inference=(MINIMAX_H3_AUDIO_REF_COND_TIMESTEP),
                     on_step=lambda step, video, audio: progress.update(),
                 )
+        _log_minimax_h3_subblock_runtime(
+            task=task,
+            before=subblock_before,
+            after=_minimax_h3_subblock_runtime_snapshot(transformer),
+        )
 
         return self._unpack_denoised_rows(
             branch,

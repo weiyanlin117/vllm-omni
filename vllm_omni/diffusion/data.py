@@ -1737,6 +1737,42 @@ class BlockSparseSpec:
 
 
 @dataclass
+class SubBlockSpec:
+    """Controls for FlashInfer blk64 SubBlock attention on B200.
+
+    ``sparsity`` is the nominal fraction of 64-token key blocks dropped for
+    each query block. The kernel bills block budgets in groups of eight, so the
+    realized sparsity can be slightly lower. Early denoise steps, early DiT
+    layers, and short sequences stay on the dense TRTLLM path.
+    """
+
+    sparsity: float = 0.75
+    skip_first_steps: int = 10
+    skip_first_layers: int = 0
+    n_q: int = 4
+    n_k: int = 4
+    min_seq_len: int = 24576
+
+    def __post_init__(self) -> None:
+        if isinstance(self.sparsity, bool):
+            raise ValueError(f"subblock.sparsity must be numeric, not boolean; got {self.sparsity!r}.")
+        self.sparsity = _in_range(self.sparsity, "subblock.sparsity", 0.0, 1.0) or 0.0
+        if self.sparsity >= 1.0:
+            raise ValueError(f"subblock.sparsity must be in [0, 1); got {self.sparsity!r}.")
+        for name, value in (
+            ("skip_first_steps", self.skip_first_steps),
+            ("skip_first_layers", self.skip_first_layers),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"subblock.{name} must be a non-negative integer; got {value!r}.")
+        for name, value in (("n_q", self.n_q), ("n_k", self.n_k)):
+            if isinstance(value, bool) or not isinstance(value, int) or value not in (1, 2, 4, 8):
+                raise ValueError(f"subblock.{name} must be one of (1, 2, 4, 8); got {value!r}.")
+        if isinstance(self.min_seq_len, bool) or not isinstance(self.min_seq_len, int) or self.min_seq_len <= 0:
+            raise ValueError(f"subblock.min_seq_len must be a positive integer; got {self.min_seq_len!r}.")
+
+
+@dataclass
 class AttentionSpec:
     """Specifies a backend and its typed backend-specific config for one attention role."""
 
@@ -1745,6 +1781,7 @@ class AttentionSpec:
     quant: AttnQuantSpec | None = None
     fastvideo_vsa_topk: int | None = None
     block_sparse: BlockSparseSpec | None = None
+    subblock: SubBlockSpec | None = None
     skip_calibration: dict | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -1753,6 +1790,7 @@ class AttentionSpec:
         self.skip_softmax = self._coerce(self.skip_softmax, SkipSoftmaxSpec, "skip_softmax")
         self.quant = self._coerce(self.quant, AttnQuantSpec, "quant")
         self.block_sparse = self._coerce(self.block_sparse, BlockSparseSpec, "block_sparse")
+        self.subblock = self._coerce(self.subblock, SubBlockSpec, "subblock")
         if self.skip_softmax is not None and self.backend.upper() != "TRTLLM_ATTN":
             raise ValueError(
                 f"skip_softmax is only supported by the TRTLLM_ATTN backend, but backend={self.backend!r}. "
@@ -1776,6 +1814,13 @@ class AttentionSpec:
             raise ValueError(
                 f"block_sparse is only supported by the {sorted(BLOCK_SPARSE_BACKENDS)} backends, but "
                 f"backend={self.backend!r}. Remove block_sparse or set a supported backend."
+            )
+        if self.backend.upper() == "SUBBLOCK_ATTN":
+            self.subblock = self.subblock or SubBlockSpec()
+        elif self.subblock is not None:
+            raise ValueError(
+                f"subblock is only supported by the SUBBLOCK_ATTN backend, but backend={self.backend!r}. "
+                "Remove subblock or set backend to SUBBLOCK_ATTN."
             )
 
     @staticmethod
@@ -1819,6 +1864,16 @@ class AttentionSpec:
             kw["precision"] = bs.precision
             if bs.skip_layer_indices:
                 kw["skip_layers"] = sorted(bs.skip_layer_indices)
+        if self.subblock is not None:
+            sb = self.subblock
+            kw.update(
+                sparsity=sb.sparsity,
+                skip_first_steps=sb.skip_first_steps,
+                skip_first_layers=sb.skip_first_layers,
+                n_q=sb.n_q,
+                n_k=sb.n_k,
+                min_seq_len=sb.min_seq_len,
+            )
 
         return kw or None
 
@@ -1889,7 +1944,7 @@ class AttentionConfig:
             normalized[role] = node
             return
 
-        spec_keys = {"backend", "skip_softmax", "quant", "fastvideo_vsa_topk", "block_sparse"}
+        spec_keys = {"backend", "skip_softmax", "quant", "fastvideo_vsa_topk", "block_sparse", "subblock"}
         node_dict = dict(node)
         node_keys = set(node_dict)
         if node_keys & spec_keys:

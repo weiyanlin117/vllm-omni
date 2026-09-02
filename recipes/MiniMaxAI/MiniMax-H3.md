@@ -301,6 +301,74 @@ FA4 remains available by explicitly selecting the `FLASH_ATTN` backend:
 On Blackwell, `FLASH_ATTN` selects FA4. Confirm the server log contains
 `Using CuTe FlashAttention-4 on Blackwell` before recording FA4 measurements.
 
+On B200/GB200 (exact SM100), `SUBBLOCK_ATTN` is an explicit experimental
+option for the long main-DiT self-attention sequence. It uses a training-free
+64-token router and FlashInfer's stock blk64 BSA kernel; the token refiner and
+the first ten denoise steps remain dense by default:
+
+```bash
+--diffusion-attention-config '{
+  "default": {
+    "backend": "SUBBLOCK_ATTN",
+    "subblock": {
+      "sparsity": 0.75,
+      "skip_first_steps": 10,
+      "skip_first_layers": 0,
+      "n_q": 4,
+      "n_k": 4,
+      "min_seq_len": 24576
+    }
+  },
+  "per_role": {
+    "minimax_h3.token_refiner": {
+      "backend": "TRTLLM_ATTN"
+    }
+  }
+}'
+```
+
+Use Ulysses with Ring and AllGather-KV degrees set to 1, keep
+`--max-num-seqs 1`, and run BF16. The backend rejects other GPUs, causal/GQA
+or non-128-head-dim shapes, Ring, AllGather-KV, and multi-document packed
+attention. Its FlashInfer symbol is JIT-backed, so an import-only check is not
+enough; follow the recursive source, CUTLASS, NVTX, prewarm, numerical, and
+paired benchmark instructions in
+[SubBlock Attention](../../docs/user_guide/diffusion/attention_backends/subblock.md).
+
+The stock FlashInfer wrapper performs Q/K/V normalization and internal block
+packing. Report those costs separately from the actual attention CUDA event,
+and require a complete dense-vs-sparse speedup confidence interval plus a
+nonzero real BSA call count. Request-mode denoising emits a rank-local
+`SUBBLOCK_ATTN request stats` summary with actual BSA calls and dense fallback
+reasons; require `actual_sparse_calls > 0`.
+
+The strict real-model gate used one B200 and true FL2VA conditioning: one
+reference image, 1344x768 at 24 FPS, five requested seconds, and 50 steps. Both
+server-scoped arms ran serially in the same Modal container on the same
+physical GPU, each with one complete excluded warmup and five matched measured
+requests. Median client wall time improved from 161.053 seconds with dense
+`TRTLLM_ATTN` to 132.999 seconds with `SUBBLOCK_ATTN`; the median paired
+speedup was 1.211x with an exact-bootstrap 1.210-1.214 95% interval. DiT time
+improved by 1.224x (1.223-1.226), while prompt/visual encoding and decode
+intervals crossed 1.0 as expected. Sampled whole-run peak HBM increased from
+73,824 MiB to 76,550 MiB.
+
+Every measured SubBlock request recorded 1,950 real BSA calls and 500 early
+dense calls: 50 main-DiT layers over 39 sparse and ten dense denoise
+transitions. The observed 160-of-622 plan retained 25.72% of key blocks, or
+74.28% realized sparsity. Every output passed full video/audio decode. See
+[SubBlock Attention](../../docs/user_guide/diffusion/attention_backends/subblock.md)
+for the container proof, stage timings, VRAM, and diagnostic quality results.
+
+The end-to-end arms were grouped rather than request-interleaved, so the
+confidence interval does not cover a systematic arm-order or long-timescale
+machine-drift effect. The experimental evidence and performance claim are
+deliberately limited to five-second FL2VA; this integration makes no 10/15-
+second claim or extrapolation. Reciprocal arm-order runs, a preregistered
+dense-versus-dense quality threshold, content-level AV sync, semantic scoring,
+and human blind review remain follow-up work before making broader production
+or quality-equivalence claims.
+
 `TRTLLM_ATTN` additionally supports two **lossy** optimizations for the long main
 DiT attention sequence: SAGE attention quantization and Skip-Softmax Sparse
 Attention. SAGE quantizes Q/K to the configured dtype and V to FP8. This example uses

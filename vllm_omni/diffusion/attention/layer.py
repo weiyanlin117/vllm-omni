@@ -156,10 +156,17 @@ class Attention(nn.Module):
         allgather_degree = getattr(parallel_config, "allgather_degree", 1)
         # TODO: Move AllGather-KV compatibility into an AttentionBackend capability
         # so validation does not depend on backend names.
-        if not skip_sequence_parallel and allgather_degree > 1 and attn_backend_cls.get_name() == "TRTLLM_ATTN":
+        backend_name = attn_backend_cls.get_name()
+        if not skip_sequence_parallel and allgather_degree > 1 and backend_name in ("TRTLLM_ATTN", "SUBBLOCK_ATTN"):
             raise ValueError(
-                "TRTLLM_ATTN does not support AllGather-KV sequence parallelism. "
+                f"{backend_name} does not support AllGather-KV sequence parallelism. "
                 "Set --allgather-degree 1 or select another diffusion attention backend."
+            )
+        ring_degree = getattr(parallel_config, "ring_degree", 1)
+        if not skip_sequence_parallel and ring_degree > 1 and backend_name == "SUBBLOCK_ATTN":
+            raise ValueError(
+                "SUBBLOCK_ATTN does not support ring sequence parallelism: ring attention bypasses the "
+                "local SubBlock router and FlashInfer BSA kernel. Set --ring-degree 1 and use Ulysses SP instead."
             )
         if spec is not None:
             backend_kwargs = spec.backend_kwargs()
@@ -515,6 +522,11 @@ class Attention(nn.Module):
             )
 
     def _run_ring_attention(self, query, key, value, attn_metadata):
+        if getattr(self.attention, "subblock_configured", False):
+            raise NotImplementedError(
+                "SUBBLOCK_ATTN is not supported with ring sequence parallelism: the ring path bypasses "
+                "the local SubBlock router and FlashInfer BSA kernel. Use Ulysses SP instead."
+            )
         skip = getattr(self.attention, "skip", None)
         if skip is not None and getattr(skip, "configured", False):
             raise NotImplementedError(
